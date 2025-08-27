@@ -1216,15 +1216,27 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         if self.playerType != cfg.MEDIA:
             return
+        
+        # Player list may be empty during initialization: bail out until ready
+        if not getattr(self, "dw_player", None) or len(self.dw_player) == 0 or not getattr(self.dw_player[0], "player", None):
+            return
 
-        current_media_time = self.dw_player[0].player.time_pos
+        current_media_time = (
+            getattr(self.dw_player[0].player, "time_pos", None)
+            if getattr(self, "dw_player", None) and len(self.dw_player) > 0 and getattr(self.dw_player[0], "player", None)
+            else None
+        )
+        if current_media_time is None:
+            return
 
         tmp_dir = self.ffmpeg_cache_dir if self.ffmpeg_cache_dir and os.path.isdir(self.ffmpeg_cache_dir) else tempfile.gettempdir()
 
         try:
-            wav_file_path = str(
-                Path(tmp_dir) / Path(self.dw_player[0].player.playlist[self.dw_player[0].player.playlist_pos]["filename"] + ".wav").name
-            )
+            pl = getattr(self.dw_player[0].player, "playlist", None)
+            ppos = getattr(self.dw_player[0].player, "playlist_pos", None)
+            if not pl or ppos is None or not (0 <= ppos < len(pl)):
+                return
+            wav_file_path = str(Path(tmp_dir) / Path(pl[ppos]["filename"] + ".wav").name)
         except Exception:
             return
 
@@ -3853,20 +3865,68 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             else:
                 write_event.write_event(self, event, cumulative_time)
             # write_event.write_event(self, event, self.getLaps())
-
-    def get_frame_index(self, player_idx: int = 0) -> Union[int, str]:
+            
+    def _get_video_fps(self) -> float | None:
         """
-        returns frame index for player player_idx
+        Query libmpv for a reliable fps with fallbacks; cache once sensible.
         """
+        if getattr(self, "_fps_cache", None):
+            return self._fps_cache
 
-        if not sys.platform.startswith(cfg.MACOS_CODE):
-            estimated_frame_number = self.dw_player[player_idx].player.estimated_frame_number
-        else:
-            estimated_frame_number = observation_operations.send_command({"command": ["get_property", "estimated_frame_number"]})
-        if estimated_frame_number is not None:
-            return estimated_frame_number
-        else:
-            return cfg.NA
+        def _prop(name):
+            try:
+                return observation_operations.send_command({"command": ["get_property", name]})
+            except Exception:
+                return None
+
+        fps = None
+
+        # best: video-params (dict) → fps or container_fps
+        vp = _prop("video-params")
+        if isinstance(vp, dict):
+            fps = vp.get("fps") or vp.get("container_fps")
+
+        # demuxer’s FPS (may be None for VFR)
+        if not fps:
+            fps = _prop("container-fps")
+
+        # estimate from the filter chain (often appears right after playback starts)
+        if not fps:
+            fps = _prop("estimated-vf-fps")
+
+        # LAST resort: display refresh rate (not ideal, but avoids NA on some sources)
+        if not fps:
+            fps = _prop("display-fps")
+
+        try:
+            fps = float(fps) if fps is not None else None
+        except Exception:
+            fps = None
+
+        if fps and fps > 0.1:
+            self._fps_cache = fps
+        return fps
+
+    def get_frame_index(self) -> str | int:
+        """
+        Return integer frame index for current position, or 'NA' if unknown.
+        """
+        # guard player readiness
+        if not getattr(self, "dw_player", None) or not self.dw_player or not getattr(self.dw_player[0], "player", None):
+            return "NA"
+
+        tp = getattr(self.dw_player[0].player, "time_pos", None)  # seconds
+        if tp is None:
+            return "NA"
+
+        fps = self._get_video_fps()
+        if not fps:
+            return "NA"
+
+        try:
+            return int(round(float(tp) * float(fps)))
+        except Exception:
+            return "NA"
 
     def actionUser_guide_triggered(self):
         """
@@ -4140,6 +4200,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         if not self.observationId:
             return
+        
+        # Player list may be empty during initialization: bail out until ready
+        if not getattr(self, "dw_player", None) or len(self.dw_player) == 0 or not getattr(self.dw_player[0], "player", None):
+            return
 
         cumulative_time_pos = self.getLaps()
         # get frame index
@@ -4199,8 +4263,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         currentTimeOffset = dec(cumulative_time_pos + self.pj[cfg.OBSERVATIONS][self.observationId][cfg.TIME_OFFSET])
 
-        all_media_duration = sum(self.dw_player[0].media_durations) / 1000
-        current_media_duration = self.dw_player[0].player.duration  # mediaplayer_length
+        #all_media_duration = sum(self.dw_player[0].media_durations) / 1000
+        # REPLACED ABOVE LINE WITH TWO LINES BELOW
+        md0 = getattr(self.dw_player[0], "media_durations", None) if getattr(self, "dw_player", None) and len(self.dw_player) > 0 else None
+        all_media_duration = (sum(md0) / 1000.0) if md0 else 0.0
+        
+        #current_media_duration = self.dw_player[0].player.duration  # mediaplayer_length
+        current_media_duration = getattr(self.dw_player[0].player, "duration", 0.0)  # mediaplayer_length
+        
         self.mediaTotalLength = current_media_duration
 
         # current state(s)
@@ -4231,6 +4301,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         else:
             current_media_name = ""
             current_playlist_index = None
+            
+        # reset cached FPS when switching to a different playlist item
+        if current_playlist_index is not None and current_playlist_index != self.mem_playlist_index:
+            self._fps_cache = None
 
         # check for ongoing state events between media or at the end of last media
 
@@ -4600,6 +4674,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 else:
                     time_pos = observation_operations.send_command({"command": ["get_property", "time-pos"]})
                     # TODO: fix!
+                    if time_pos in (None, "", "None"):
+                        return dec("0")
                     return dec(time_pos)
 
                 return dec(str(round(mem_laps / 1000, 3)))
@@ -4725,19 +4801,24 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def is_playing(self) -> bool:
         """
         check if first media player is playing for cfg.MEDIA
-
         Returns:
             bool: True if playing else False
         """
+        # Guard: player list may not be initialized yet
+        dw = getattr(self, "dw_player", None)
+        if not dw or len(dw) == 0 or not getattr(dw[0], "player", None):
+            return False
 
         if self.playerType != cfg.MEDIA:
             return False
-        if self.dw_player[0].player.pause:
+
+        # Treat missing .pause as paused until mpv updates it
+        if getattr(self.dw_player[0].player, "pause", True):
             return False
-        elif self.dw_player[0].player.time_pos is not None:
-            return True
-        else:
-            return False
+
+        # time_pos can be None briefly; only True if it’s a number
+        tp = getattr(self.dw_player[0].player, "time_pos", None)
+        return tp is not None
 
     def update_project_zoom_pan_values(self):
         """
@@ -5440,37 +5521,36 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         play video
         check if first player ended
         """
-
         if self.geometric_measurements_mode:
             return
-
         if self.playerType != cfg.MEDIA:
             return
 
-        # check if player 1 is ended
+        # Guard: player list may not be initialized yet
+        if (not getattr(self, "dw_player", None)
+            or len(self.dw_player) == 0
+            or not getattr(self.dw_player[0], "player", None)):
+            return
+
+        # Unpause any configured players in the observation
         for i, dw in enumerate(self.dw_player):
-            if (
-                str(i + 1) in self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE]
-                and self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE][str(i + 1)]
-            ):
-                dw.player.pause = False
+            if (str(i + 1) in self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE]
+                and self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE][str(i + 1)]):
+                if getattr(dw, "player", None):
+                    # default to paused=True if attr missing; only flip when safe
+                    if getattr(dw.player, "pause", True):
+                        dw.player.pause = False
 
         self.lb_player_status.clear()
-
-        # if self.pj[cfg.OBSERVATIONS][self.observationId].get(cfg.VISUALIZE_WAVEFORM, False) \
-        #    or self.pj[cfg.OBSERVATIONS][self.observationId].get(VISUALIZE_SPECTROGRAM, False):
-
         self.statusbar.showMessage("", 0)
 
+        # Start timers (safe even if media hasn’t produced timestamps yet)
         self.plot_timer.start()
-
-        # start all timer for plotting data
         for data_timer in self.ext_data_timer_list:
             data_timer.start()
 
         self.actionPlay.setIcon(QIcon(f":/pause_{gui_utilities.theme_mode()}"))
         self.actionPlay.setText("Pause")
-
         return True
 
     def pause_video(self, msg: str = "Player paused"):
@@ -5478,22 +5558,23 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         pause media
         does not pause media if already paused (to prevent media played again)
         """
-
         if self.playerType != cfg.MEDIA:
             return
 
-        for i, player in enumerate(self.dw_player):
-            if (
-                str(i + 1) in self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE]
-                and self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE][str(i + 1)]
-            ):
-                if not player.player.pause:
+        # Guard: player list may not be initialized yet
+        if (not getattr(self, "dw_player", None)
+            or len(self.dw_player) == 0
+            or not getattr(self.dw_player[0], "player", None)):
+            return
+
+        for i, dw in enumerate(self.dw_player):
+            if (str(i + 1) in self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE]
+                and self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE][str(i + 1)]):
+                if getattr(dw, "player", None) and not getattr(dw.player, "pause", True):
                     self.plot_timer.stop()
-                    # stop all timer for plotting data
                     for data_timer in self.ext_data_timer_list:
                         data_timer.stop()
-
-                    player.player.pause = True
+                    dw.player.pause = True
 
         self.lb_player_status.setText(msg)
 
@@ -5511,7 +5592,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """
         if not self.observationId:
             return
-
         if self.pj[cfg.OBSERVATIONS][self.observationId][cfg.TYPE] != cfg.MEDIA:
             return
 
@@ -5524,50 +5604,77 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """
         rewind from current position
         """
-        if self.playerType == cfg.MEDIA:
-            logging.debug("jump backward")
+        # Guard: player may not be initialized yet
+        if (not getattr(self, "dw_player", None)
+            or len(self.dw_player) == 0
+            or not getattr(self.dw_player[0], "player", None)):
+            return
 
-            decrement = self.fast * self.play_rate if self.config_param.get(cfg.ADAPT_FAST_JUMP, cfg.ADAPT_FAST_JUMP_DEFAULT) else self.fast
+        if self.playerType != cfg.MEDIA:
+            return
 
-            new_time = (
-                sum(self.dw_player[0].media_durations[0 : self.dw_player[0].player.playlist_pos]) / 1000
-                + self.dw_player[0].player.playback_time
-                - decrement
-            )
+        logging.debug("jump backward")
 
-            if new_time < decrement:
-                new_time = 0
+        # Step size (respect adaptive setting)
+        decrement = (self.fast * self.play_rate
+                    if self.config_param.get(cfg.ADAPT_FAST_JUMP, cfg.ADAPT_FAST_JUMP_DEFAULT)
+                    else self.fast)
 
-            self.seek_mediaplayer(new_time)
+        # Safe handles/reads
+        p0 = self.dw_player[0].player
+        md0 = getattr(self.dw_player[0], "media_durations", None)  # list of ms
+        ppos = getattr(p0, "playlist_pos", None)
 
-            self.update_visualizations()
+        # Seconds accumulated before the current item
+        base_sec = (sum(md0[:ppos]) / 1000.0) if (md0 and isinstance(ppos, int) and ppos > 0) else 0.0
 
-            # subtitles
-            """
-            st_track_number = 0 if self.config_param[DISPLAY_SUBTITLES] else -1
-            for player in self.dw_player:
-                player.mediaplayer.video_set_spu(st_track_number)
-            """
+        # Current position (seconds) within current item
+        tpos = getattr(p0, "time_pos", None)
+        if tpos is None:
+            # If mpv hasn’t reported a position yet, nothing to do
+            return
+
+        # New absolute time in the concatenated timeline
+        new_time = base_sec + float(tpos) - float(decrement)
+        if new_time < 0:
+            new_time = 0.0
+
+        self.seek_mediaplayer(new_time)
+        self.update_visualizations()
 
     def jumpForward_activated(self):
         """
         forward from current position
         """
+        if self.playerType != cfg.MEDIA:
+            return
 
-        if self.playerType == cfg.MEDIA:
-            increment = self.fast * self.play_rate if self.config_param.get(cfg.ADAPT_FAST_JUMP, cfg.ADAPT_FAST_JUMP_DEFAULT) else self.fast
+        # Guard: player may not be initialized yet
+        if (not getattr(self, "dw_player", None)
+            or len(self.dw_player) == 0
+            or not getattr(self.dw_player[0], "player", None)):
+            return
 
-            logging.info(f"Jump forward for {increment} seconds")
+        increment = (self.fast * self.play_rate
+                    if self.config_param.get(cfg.ADAPT_FAST_JUMP, cfg.ADAPT_FAST_JUMP_DEFAULT)
+                    else self.fast)
+        logging.info(f"Jump forward for {increment} seconds")
 
-            new_time = (
-                sum(self.dw_player[0].media_durations[0 : self.dw_player[0].player.playlist_pos]) / 1000
-                + self.dw_player[0].player.playback_time
-                + increment
-            )
+        p0 = self.dw_player[0].player
+        md0 = getattr(self.dw_player[0], "media_durations", None)  # list of ms
+        ppos = getattr(p0, "playlist_pos", None)
 
-            self.seek_mediaplayer(new_time)
+        # Seconds accumulated before current item
+        base_sec = (sum(md0[:ppos]) / 1000.0) if (md0 and isinstance(ppos, int) and ppos > 0) else 0.0
 
-            self.update_visualizations()
+        # Current position (seconds) within current item
+        tpos = getattr(p0, "time_pos", None)
+        if tpos is None:
+            return
+
+        new_time = base_sec + float(tpos) + float(increment)
+        self.seek_mediaplayer(new_time)
+        self.update_visualizations()
 
     def update_visualizations(self, scroll_slider=False):
         """

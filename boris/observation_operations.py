@@ -1307,16 +1307,30 @@ def init_mpv(self):
     subprocess.Popen(
         [
             "mpv",
-            "--no-border",
+            #"--no-border",
             "--ontop",  # mpv window on top
-            "--osc=no",  # no on screen commands
+            #"--osc=no",  # no on screen commands
             "--input-ipc-server=" + cfg.MPV_SOCKET,
-            # "--wid=" + str(int(self.winId())),  # Embed in the widget
-            "--idle",  # Keeps mpv running with no video
+            #"--wid=" + str(int(self.winId())),  # Embed in the widget
+            #"--idle",  # Keeps mpv running with no video
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    
+    #subprocess.Popen(
+    #    [
+    #        "mpv",
+    #        "--no-border",
+    #        "--ontop",  # mpv window on top
+    #        "--osc=no",  # no on screen commands
+    #        "--input-ipc-server=" + cfg.MPV_SOCKET,
+    #        # "--wid=" + str(int(self.winId())),  # Embed in the widget
+    #        "--idle",  # Keeps mpv running with no video
+    #    ],
+    #    stdout=subprocess.PIPE,
+    #    stderr=subprocess.PIPE,
+    #)
 
     # print(f"init mpv:  {self.mpv_process=}")
 
@@ -1428,6 +1442,9 @@ def initialize_new_media_observation(self) -> bool:
     # add all media files to media lists
     self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks)
     self.dw_player: list = []
+    
+    # reset cached FPS so the new file computes a fresh value
+    self._fps_cache = None
 
     # check if media creation time used as offset
     # TODO check if cfg.MEDIA_CREATION_TIME dict is present
@@ -2013,6 +2030,9 @@ def initialize_new_media_observation(self) -> bool:
 
     else:  # macos
         print(self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE])
+
+        # reset cached FPS before loading the first file
+        self._fps_cache = None
 
         for mediaFile in self.pj[cfg.OBSERVATIONS][self.observationId][cfg.FILE]["1"]:
             logging.debug(f"media file: {mediaFile}")

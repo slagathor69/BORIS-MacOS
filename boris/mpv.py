@@ -47,15 +47,43 @@ else:
     # still better than segfaulting, we are setting LC_NUMERIC to "C".
     locale.setlocale(locale.LC_NUMERIC, "C")
 
+    # Prefer explicit override or common macOS locations; fall back to find_library
+    lib_override = (os.environ.get("MPV_LIBRARY")
+                    or os.environ.get("LIBMPV")
+                    or os.environ.get("LIBMPV_PATH"))
+
+    candidates = []
+    if lib_override:
+        candidates.append(lib_override)
+
+    # Common absolute paths on macOS (Apple Silicon + Intel)
+    candidates += [
+        "/opt/homebrew/lib/libmpv.2.dylib",
+        "/usr/local/lib/libmpv.2.dylib",
+        "/opt/homebrew/lib/libmpv.dylib",
+        "/usr/local/lib/libmpv.dylib",
+    ]
+
     sofile = ctypes.util.find_library("mpv")
-    if sofile is None:
-        raise OSError(
-            "Cannot find libmpv in the usual places. Depending on your distro, you may try installing an "
-            "mpv-devel or mpv-libs package. If you have libmpv around but this script can't find it, consult "
-            "the documentation for ctypes.util.find_library which this script uses to look up the library "
-            "filename."
-        )
-    backend = CDLL(sofile)
+    if sofile:
+        # put find_library result first if it returned something
+        candidates.insert(0, sofile)
+
+    last_err = None
+    backend = None
+    # RTLD_GLOBAL helps downstream plugins resolve symbols
+    _rtld_global = getattr(ctypes, "RTLD_GLOBAL", 0)
+
+    for cand in candidates:
+        try:
+            backend = CDLL(cand, _rtld_global) if _rtld_global else CDLL(cand)
+            sofile = cand  # keep the actually loaded path (absolute if we used our candidates)
+            break
+        except Exception as e:
+            last_err = e
+
+    if backend is None:
+        raise OSError("Cannot load libmpv; tried: " + ", ".join(candidates)) from last_err
 
     fs_enc = sys.getfilesystemencoding()
 
