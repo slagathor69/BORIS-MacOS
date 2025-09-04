@@ -49,7 +49,13 @@ class MpvWidget(QOpenGLWidget):
         self._mpv = c_void_p(mpv.mpv_create())
         if not self._mpv:
             raise RuntimeError("mpv_create failed")
+
+        # set options BEFORE initialize
         mpv.mpv_set_option_string(self._mpv, b"vo", b"libmpv")
+        mpv.mpv_set_option_string(self._mpv, b"gpu-api", b"opengl")
+        mpv.mpv_set_option_string(self._mpv, b"gpu-context", b"mac")
+
+        # now initialize
         mpv.mpv_initialize(self._mpv)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
@@ -78,13 +84,14 @@ class MpvWidget(QOpenGLWidget):
             self.update()
 
     def initializeGL(self):
-        # tie mpv’s Render API to Qt’s OpenGL context
         qt_ctx = QOpenGLContext.currentContext()
 
         # trampoline to Qt's getProcAddress
         GETPROC = CFUNCTYPE(c_void_p, c_void_p, c_char_p)
         def _get_proc(_, name):
             addr = qt_ctx.getProcAddress(name.decode("utf-8"))
+            if not addr:
+                print("Missing GL proc:", name)
             return int(addr) if addr else 0
 
         self._getproc = GETPROC(_get_proc)
@@ -102,23 +109,32 @@ class MpvWidget(QOpenGLWidget):
             mpv_render_param(MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, byref(gl_init)),
             mpv_render_param(MPV_RENDER_PARAM_INVALID, None),
         )
+
         r = mpv.mpv_render_context_create(byref(self._rc), self._mpv, params)
         if r < 0:
             raise RuntimeError("mpv_render_context_create failed")
 
-        # 🔽 ADD THIS: set update callback so Qt repaints when mpv has a frame
         UPDATE_CB = CFUNCTYPE(None, c_void_p)
         def _on_update(_):
             QMetaObject.invokeMethod(self, "update", Qt.QueuedConnection)
 
-        self._update_cb = UPDATE_CB(_on_update)  # keep a reference!
+        self._update_cb = UPDATE_CB(_on_update)
         mpv.mpv_render_context_set_update_callback(self._rc, self._update_cb, None)
-
+        
     def paintGL(self):
         if not self._rc:
             return
+        from OpenGL import GL
+        GL.glClearColor(0.2, 0.2, 0.2, 1.0)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+
         dpr = self.devicePixelRatioF()
-        fbo = mpv_opengl_fbo(int(self.defaultFramebufferObject()), int(self.width()*dpr), int(self.height()*dpr), 0)
+        fbo = mpv_opengl_fbo(
+            int(self.defaultFramebufferObject()),
+            int(self.width() * dpr),
+            int(self.height() * dpr),
+            0
+        )
         flip = c_int(0)
         params = (mpv_render_param * 3)(
             mpv_render_param(MPV_RENDER_PARAM_OPENGL_FBO, cast(pointer(fbo), c_void_p)),

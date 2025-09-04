@@ -1,0 +1,23 @@
+name: boris
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - matplotlib
+  - scipy
+  - odfpy
+  - openpyxl
+  - contourpy
+  - pandas
+  - tablib
+  - pyreadr
+  - python-dateutil
+  - exifread
+  - pip
+  - pip:
+      - pyqt5
+      - pyside6
+      - boris-behav-obs
+      - hachoir
+      - mpv
